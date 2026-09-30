@@ -1,247 +1,195 @@
 #!/usr/bin/env bash
-# _agent_model_guard.sh — PreToolUse(Agent) hook: enforce the Model-Tier Policy.
+# model-guard.sh — PreToolUse(Agent) hook: enforce a per-agent model-tier FLOOR at spawn time.
 #
-# WHY: the per-agent `model:` frontmatter is a NO-OP in the current Claude Code version
-# (a `model: haiku` agent still serves Opus — verified 2026-06-05). The ONLY effective
-# lever is the spawn-time `model` opt on the Agent tool. This hook makes that lever
-# enforceable: it blocks an Agent spawn that omits `model` or requests a model BELOW the
-# agent's assigned tier floor. Agents with no declared floor pass through. Over-tiering
-# passes too, but an Explore spawn above haiku gets an ADVISORY (Stage 1b) — escalation
-# for auth/RLS/medical is legitimate for specialists, and never for read-only search.
+# WHY: what model a subagent runs on is decided by the `model` option passed when it is spawned.
+# Relying on an agent file's `model:` frontmatter alone has been observed not to govern the served
+# model in some Claude Code versions — an agent declared `model: haiku` still ran on the session's
+# (larger) model. Either way, a spawn with no `model` option inherits the main session's model,
+# which silently overspends on work a cheaper tier handles, and a spawn BELOW an agent's intended
+# tier silently risks quality. This hook makes the intended tier enforceable where it is decided:
 #
-# Source of truth = the agent's OWN frontmatter `model:` in .claude/agents/<type>.md
-# (so retiering an agent there automatically updates enforcement — DRY). Built-in agents
-# with no file use the defaults below (CLAUDE.md Model-Tier Policy).
+#   Stage 1   BLOCK a spawn that omits `model`, or requests a model below the agent's floor.
+#   Stage 1b  ADVISE (never block) when a read-only search agent is spawned above its ceiling.
+#   Stage 2   ADVISE (never block) when the delegation prompt looks under-specified.
 #
-# Wired in settings.json (user applies via /update-config) — add to hooks.PreToolUse:
-#   { "matcher": "Agent", "hooks": [
-#       { "type": "command", "command": "scripts/_agent_model_guard.sh" } ] }
+# Floors come from, in order: the agent's own frontmatter `model:` (project `.claude/agents/`,
+# then `~/.claude/agents/`), then `.claude/spawn-guards.json` in the project, then built-in
+# defaults. So re-tiering an agent in its own file automatically updates enforcement.
 #
-# Escape hatch (intentional over/under-ride): AGENT_MODEL_GUARD_OK=1 in the environment.
+# Config (optional) — <project>/.claude/spawn-guards.json:
+#   { "floors":   { "Explore": "haiku", "my-reviewer": "sonnet" },
+#     "ceilings": { "Explore": "haiku" },
+#     "search_agents": ["Explore"] }
+#
+# Override for one session: SPAWN_GUARDS_OK=1 in the environment disables all stages.
 set -uo pipefail
 
-command -v python3 >/dev/null 2>&1 || exit 0   # fail-open if no python3
-[ "${AGENT_MODEL_GUARD_OK:-0}" = "1" ] && exit 0
+command -v python3 >/dev/null 2>&1 || exit 0   # fail open without python3
+[ "${SPAWN_GUARDS_OK:-0}" = "1" ] && exit 0
 
-# Read the tool-call JSON from stdin into an env var so the python heredoc (which owns
-# stdin) can read it without a stdin conflict, and so single quotes in python are safe.
-# Captured ONCE into an exported var because two stages consume it: the blocking tier
-# check below, then the advisory delegation-quality check. stdin can only be drained once.
-AGENT_GUARD_JSON="$(cat)"
-export AGENT_GUARD_JSON
+# The hook payload arrives on stdin once; three stages read it, so capture it into the
+# environment (the python heredocs own stdin).
+SPAWN_GUARD_JSON="$(cat)"
+export SPAWN_GUARD_JSON
 
+# Shared config loader, emitted into each stage so the stages stay independent processes.
+read -r -d '' SPAWN_GUARD_CONFIG_PY <<'PY'
+import json, os
+RANK = {"haiku": 0, "sonnet": 1, "opus": 2, "fable": 3}
+DEFAULTS = {
+    "floors": {"Explore": "haiku", "general-purpose": "haiku"},
+    "ceilings": {"Explore": "haiku"},
+    "search_agents": ["Explore"],
+}
+def load_config():
+    cfg = {k: (dict(v) if isinstance(v, dict) else list(v)) for k, v in DEFAULTS.items()}
+    root = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    try:
+        with open(os.path.join(root, ".claude", "spawn-guards.json")) as fh:
+            user = json.load(fh)
+    except (OSError, ValueError):
+        return cfg
+    for key in ("floors", "ceilings"):
+        if isinstance(user.get(key), dict):
+            cfg[key].update({k: str(v).lower() for k, v in user[key].items()})
+    if isinstance(user.get("search_agents"), list):
+        cfg["search_agents"] = [str(a) for a in user["search_agents"]]
+    return cfg
+def payload():
+    try:
+        data = json.loads(os.environ.get("SPAWN_GUARD_JSON", ""))
+    except ValueError:
+        return None
+    return data.get("tool_input") or {}
+PY
+export SPAWN_GUARD_CONFIG_PY
+
+# ── Stage 1 — tier FLOOR (blocking) ──────────────────────────────────────────────────
 python3 <<'PY'
-import json, os, re, sys
+import os, re, sys
+exec(os.environ["SPAWN_GUARD_CONFIG_PY"])
 
-raw = os.environ.get("AGENT_GUARD_JSON", "")
-try:
-    data = json.loads(raw)
-except Exception:
-    sys.exit(0)  # unparseable -> fail open
-
-ti = (data.get("tool_input") or {})
+ti = payload()
+if ti is None:
+    sys.exit(0)  # unparseable payload -> fail open
 atype = (ti.get("subagent_type") or "").strip()
 requested = (ti.get("model") or "").strip().lower()
-if not atype:
+# A fork inherits the parent's model and context by design; there is no tier to enforce.
+if not atype or atype == "fork":
     sys.exit(0)
 
-RANK = {"haiku": 0, "sonnet": 1, "opus": 2, "fable": 3}
-
-# Built-in agents have no frontmatter file (CLAUDE.md Model-Tier Policy defaults).
-BUILTIN_FLOOR = {
-    "Explore": "haiku",
-    "general-purpose": "haiku",
-    "code-reviewer": "sonnet",
-    "swift-debugger": "opus",
-}
-
-def floor_for(t):
-    root = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-    path = os.path.join(root, ".claude", "agents", t + ".md")
-    try:
-        with open(path) as f:
-            head = f.read(2000)
+def frontmatter_floor(agent):
+    roots = [os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd(), os.path.expanduser("~")]
+    for root in roots:
+        try:
+            with open(os.path.join(root, ".claude", "agents", agent + ".md")) as fh:
+                head = fh.read(4000)
+        except OSError:
+            continue
         m = re.search(r"(?m)^model:\s*([A-Za-z]+)\s*$", head)
         if m:
             return m.group(1).strip().lower()
-    except OSError:
-        pass
-    return BUILTIN_FLOOR.get(t)
+    return None
 
-floor = floor_for(atype)
+cfg = load_config()
+floor = frontmatter_floor(atype) or cfg["floors"].get(atype)
 if floor not in RANK:
-    sys.exit(0)  # no declared floor / "inherit" / unknown -> nothing to enforce
+    sys.exit(0)  # no floor, "inherit", or unknown -> nothing to enforce
 
 if not requested:
     sys.stderr.write(
-        'BLOCKED: Agent "' + atype + '" has tier floor "' + floor + '" but you spawned it '
-        'with NO `model` opt.\nThe per-agent frontmatter is a NO-OP in this Claude Code '
-        'version, so an Agent spawn without `model` inherits the (Opus) main-session model '
-        '— defeating the Model-Tier Policy and overspending.\nRe-spawn with the Agent tool '
-        '`model` opt set to "' + floor + '" (or higher to escalate, e.g. opus for an '
-        'auth/RLS/medical task). See CLAUDE.md "Model-Tier Policy".\n'
-        'Override: AGENT_MODEL_GUARD_OK=1.\n'
-    )
+        f'BLOCKED: agent "{atype}" has model-tier floor "{floor}", but it was spawned with no '
+        f'`model` option, so it would inherit the main session\'s model.\n'
+        f'Re-spawn with model "{floor}" (or higher, if this task genuinely needs it).\n'
+        f'Override for this session: SPAWN_GUARDS_OK=1.\n')
     sys.exit(2)
 
 if requested not in RANK:
-    sys.exit(0)  # unrecognized model string -> do not block
+    sys.exit(0)  # a model name this hook does not know -> never block on a guess
 
 if RANK[requested] < RANK[floor]:
     sys.stderr.write(
-        'BLOCKED: Agent "' + atype + '" requested model "' + requested + '", which is BELOW '
-        'its tier floor "' + floor + '".\nThis risks quality on work that needs the stronger '
-        'model (Rule 9 / Model-Tier Policy).\nRe-spawn with model "' + floor + '" or higher. '
-        'Override: AGENT_MODEL_GUARD_OK=1.\n'
-    )
+        f'BLOCKED: agent "{atype}" requested model "{requested}", below its floor "{floor}".\n'
+        f'Re-spawn with model "{floor}" or higher. Override: SPAWN_GUARDS_OK=1.\n')
     sys.exit(2)
-
 sys.exit(0)
 PY
-
-# A non-zero exit above is a real BLOCK (tier violation) — propagate it and stop. The
-# advisory stage must never turn a block into a pass, nor run after one.
 TIER_RC=$?
+# A block is final: the advisory stages must never turn it into a pass or run after it.
 [ "$TIER_RC" -ne 0 ] && exit "$TIER_RC"
 
-# ---------------------------------------------------------------------------------------
-# Stage 1b — tier CEILING (advisory, never blocks).
-#
-# Stage 1 only sees UNDER-tiering. Over-tiering was invisible: measured 2026-09-27, three
-# Explore spawns in one session requested sonnet where policy says haiku, and the guard
-# passed all three silently. The floor protects quality; the ceiling protects spend.
-#
-# ADVISORY, not blocking, because escalation is sometimes legitimate (the policy names
-# escalation overrides for specialists), and because a blocking ceiling that fires on a
-# deliberate choice trains AGENT_MODEL_GUARD_OK=1 — which would also disable the floor
-# above (Rule 42). Scoped to the ONE agent whose ceiling the policy states outright:
-# Explore is read-only search, with no escalation clause anywhere in CLAUDE.md.
+# ── Stage 1b — tier CEILING (advisory) ───────────────────────────────────────────────
+# The floor protects quality; the ceiling protects spend. Advisory because escalation can be
+# deliberate, and a blocking ceiling would train people to set the override — which would
+# switch off the floor too.
 python3 <<'PY'
-import json, os, sys
-
-try:
-    data = json.loads(os.environ.get("AGENT_GUARD_JSON", ""))
-except Exception:
-    sys.exit(0)
-
-ti = data.get("tool_input") or {}
+import os, sys
+exec(os.environ["SPAWN_GUARD_CONFIG_PY"])
+ti = payload() or {}
 atype = (ti.get("subagent_type") or "").strip()
 requested = (ti.get("model") or "").strip().lower()
-
-RANK = {"haiku": 0, "sonnet": 1, "opus": 2, "fable": 3}
-# Only agents with NO sanctioned escalation belong here — see the note above.
-CEILING = {"Explore": "haiku"}
-
-ceiling = CEILING.get(atype)
-if ceiling is None or requested not in RANK or RANK[requested] <= RANK[ceiling]:
-    sys.exit(0)
-
-sys.stderr.write(
-    "\n[model-tier] ADVISORY (not blocking) — \"%s\" requested %s; its policy ceiling is %s.\n"
-    % (atype, requested, ceiling)
-    + "  Read-only search does not need a stronger model; the difference is spend, not quality.\n"
-      "  Re-spawn with model \"%s\" unless this search genuinely needs judgment, in which case\n"
-      "  a general-purpose or specialist agent is the better fit. See CLAUDE.md Model-Tier Policy.\n\n"
-    % ceiling
-)
+ceiling = load_config()["ceilings"].get(atype)
+if ceiling in RANK and requested in RANK and RANK[requested] > RANK[ceiling]:
+    sys.stderr.write(
+        f'\n[spawn-guards] ADVISORY — "{atype}" requested {requested}; its ceiling is {ceiling}.\n'
+        f'  Read-only search rarely needs a stronger model; the difference is spend, not quality.\n'
+        f'  If this search needs judgment, a general-purpose or specialist agent fits better.\n\n')
 sys.exit(0)
 PY
 
-# ---------------------------------------------------------------------------------------
-# Stage 2 — delegation QUALITY (advisory, never blocks).
-#
-# The Model-Tier Policy above governs WHICH model runs the work. This governs whether the
-# delegate can actually do it. CLAUDE.md names the failure directly: "No telephone game —
-# if the lossy summary would drop signal the orchestrator needs, either keep it inline or
-# require structured output." A one-line delegation is how that signal gets dropped, and
-# the cost lands on the parent, who then re-does the work (paying twice) or ships the
-# delegate's guess.
-#
-# ADVISORY on purpose. "Is this prompt well-formed?" is a judgment call, and a blocking
-# gate that is wrong even occasionally trains people to set the override permanently
-# (Rule 42) — at which point the tier enforcement above, which shares the override, dies
-# with it. A false positive here would cost more than the miss it prevents.
+# ── Stage 2 — delegation quality (advisory) ──────────────────────────────────────────
+# A delegate cannot ask a follow-up question: whatever the prompt leaves out, it invents.
+# Two or more weak signals are required before speaking, because any single one is too
+# often a fine prompt phrased differently.
 python3 <<'PY'
-import hashlib, json, os, re, sys
-
-try:
-    data = json.loads(os.environ.get("AGENT_GUARD_JSON", ""))
-except Exception:
-    sys.exit(0)
-
-ti = data.get("tool_input") or {}
+import hashlib, os, re, sys
+exec(os.environ["SPAWN_GUARD_CONFIG_PY"])
+ti = payload() or {}
 atype = (ti.get("subagent_type") or "").strip()
-prompt = (ti.get("prompt") or "")
-if not atype or not prompt.strip():
+prompt = ti.get("prompt") or ""
+if not atype or atype == "fork" or not prompt.strip():
     sys.exit(0)
 
-# Read-only search agents are legitimately terse ("find every call site of X"), so the
-# brevity heuristic would be mostly false positives there.
-SEARCH_AGENTS = {"Explore", "research-coordinator"}
-
+search_agents = set(load_config()["search_agents"])
 text = prompt.lower()
-
-# Does the prompt say what to COME BACK WITH? Without it the delegate picks its own
-# format and the parent gets prose where it needed a list, or a summary where it needed
-# file:line.
-DELIVERABLE = ("return", "report", "list", "output", "provide", "summar", "answer",
-               "identify", "produce", "write", "give me", "respond with", "deliver",
-               # Search/locate verbs are deliverable statements too — "find every call
-               # site" says exactly what comes back. Omitting these flagged a perfectly
-               # good Explore delegation on the first run of the tests.
-               "find", "locate", "search", "enumerate", "trace", "map ", "audit", "review")
-has_deliverable = any(w in text for w in DELIVERABLE)
-
-# Does it say what DONE looks like? For implementation work this is what stops a delegate
-# declaring victory on a partial change.
+DELIVERABLE = ("return", "report", "list", "output", "provide", "summar", "answer", "identify",
+               "produce", "write", "give me", "respond with", "deliver", "find", "locate",
+               "search", "enumerate", "trace", "map ", "audit", "review")
 ACCEPTANCE = ("verify", "test", "must ", "should ", "criteria", "done when", "acceptance",
               "ensure", "confirm", "check that", "passes", "expect")
-has_acceptance = any(w in text for w in ACCEPTANCE)
-
-# Concrete anchors — a path, a symbol, a file. A delegation with none is asking the
-# delegate to guess the scope the parent already knows.
-# Any multi-hump CamelCase identifier counts, not a fixed suffix list: the first version
-# enumerated View/Service/Manager/Tool/Tests and so missed "PlannerFrontierSelector",
-# flagging a good prompt. A closed vocabulary of suffixes drifts from the codebase exactly
-# the way a hand-kept keyword table does (Rule 104).
-has_anchor = bool(re.search(r"[\w/]+\.(swift|py|sh|md|json|yml|yaml)\b", prompt)
+has_anchor = bool(re.search(r"[\w/]+\.[A-Za-z]{1,5}\b", prompt)
                   or re.search(r"\b[A-Z][a-z0-9]+[A-Z][a-zA-Z0-9]*\b", prompt)
                   or "/" in prompt)
 
 problems = []
-if len(prompt.strip()) < 120 and atype not in SEARCH_AGENTS:
+if len(prompt.strip()) < 120 and atype not in search_agents:
     problems.append("it is very short for a non-search agent (<120 chars)")
-if not has_deliverable:
-    problems.append("it never says what to RETURN (no deliverable named)")
-if not has_acceptance and atype not in SEARCH_AGENTS:
-    problems.append("it never says what DONE looks like (no acceptance criteria)")
+if not any(w in text for w in DELIVERABLE):
+    problems.append("it never says what to RETURN")
+if not any(w in text for w in ACCEPTANCE) and atype not in search_agents:
+    problems.append("it never says what DONE looks like")
 if not has_anchor:
     problems.append("it names no file, path, or symbol to anchor the scope")
-
-# Two or more signals before speaking. Any single one alone is too often a fine prompt
-# that simply phrases things differently.
 if len(problems) < 2:
     sys.exit(0)
 
-# Dedupe on the PROMPT, not the session: re-spawning the same prompt after a tier block
-# should not warn twice, but a different weak prompt genuinely deserves its own warning.
-fp = hashlib.sha256((atype + "|" + prompt).encode()).hexdigest()[:16]
-sentinel = "/tmp/.claude-delegation-warn-%s" % fp
+# Warn once per distinct prompt (a re-spawn after a floor block should not warn twice).
+state = os.environ.get("CLAUDE_PLUGIN_DATA") or os.environ.get("TMPDIR") or "/tmp"
+sentinel = os.path.join(state, "spawn-guards-warned-"
+                        + hashlib.sha256((atype + "|" + prompt).encode()).hexdigest()[:16])
 if os.path.exists(sentinel):
     sys.exit(0)
 try:
+    os.makedirs(state, exist_ok=True)
     open(sentinel, "w").close()
 except OSError:
     pass
 
 sys.stderr.write(
-    "\n[delegation] ADVISORY (not blocking) — this spawn of \"%s\" may under-specify:\n" % atype
-    + "".join("  - %s\n" % p for p in problems)
-    + "  A delegate cannot ask a follow-up question; whatever is missing here, it will\n"
-      "  invent. Cheapest fix is one more sentence naming the deliverable and the check.\n"
-      "  See /brief and Documentation/Dev Guides/Core/PROMPT_AND_DELEGATION_FORMAT.md.\n"
-      "  For results the orchestrator must not lose, pass a schema rather than prose.\n\n"
-)
+    f'\n[spawn-guards] ADVISORY — this spawn of "{atype}" may be under-specified:\n'
+    + "".join(f"  - {p}\n" for p in problems)
+    + "  One more sentence naming the deliverable and how to check it is the cheapest fix.\n"
+      "  For results you must not lose, ask for structured output rather than prose.\n\n")
 sys.exit(0)
 PY
 exit 0

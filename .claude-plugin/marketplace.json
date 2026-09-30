@@ -1,0 +1,12 @@
+{
+  "name": "claude-devtools",
+  "owner": { "name": "sconedrag" },
+  "description": "Tooling for running Claude Code at scale: subagent spawn guards today; parallel-session coordination, delegation economics and context-pressure hooks to follow.",
+  "plugins": [
+    {
+      "name": "spawn-guards",
+      "source": "./plugins/spawn-guards",
+      "description": "Enforce a per-agent model-tier floor on subagent spawns, and flag delegation prompts that reference context the subagent cannot see."
+    }
+  ]
+}

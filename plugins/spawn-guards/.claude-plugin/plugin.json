@@ -1,0 +1,10 @@
+{
+  "name": "spawn-guards",
+  "version": "0.1.0",
+  "description": "PreToolUse guards for subagent spawns: enforce a per-agent model-tier floor, and flag delegation prompts that reference context the subagent cannot see.",
+  "author": { "name": "sconedrag" },
+  "homepage": "https://github.com/sconedrag/claude-devtools",
+  "repository": "https://github.com/sconedrag/claude-devtools",
+  "license": "Apache-2.0",
+  "keywords": ["subagents", "model-tier", "cost", "delegation", "hooks"]
+}
