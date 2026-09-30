@@ -52,8 +52,8 @@ since they inherit the parent's context by design.
 ## Install
 
 ```text
-/plugin marketplace add sconedrag/claude-devtools
-/plugin install spawn-guards@claude-devtools
+/plugin marketplace add sconedrag/pitwright
+/plugin install spawn-guards@pitwright
 ```
 
 Requires `python3` on `PATH` (standard library only). Without it the hooks fail open.

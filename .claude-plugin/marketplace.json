@@ -1,5 +1,5 @@
 {
-  "name": "claude-devtools",
+  "name": "pitwright",
   "owner": { "name": "sconedrag" },
   "description": "Tooling for running Claude Code at scale: subagent spawn guards today; parallel-session coordination, delegation economics and context-pressure hooks to follow.",
   "plugins": [

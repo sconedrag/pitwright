@@ -1,7 +1,8 @@
-# claude-devtools
+# pitwright
 
-A [Claude Code](https://code.claude.com) plugin marketplace of tooling for running Claude Code
-seriously: many subagents, long sessions, several sessions on one repository at once.
+**Tools for the pit crew behind your agents.** A [Claude Code](https://code.claude.com) plugin
+marketplace for running Claude Code seriously: many subagents, long sessions, several sessions
+on one repository at once — kept on the right model, coordinated, and inside budget.
 
 Everything here was built and measured on a large production repository before being extracted.
 Each plugin installs on its own and has its own tests.
@@ -16,8 +17,8 @@ Each plugin installs on its own and has its own tests.
 ## Install
 
 ```text
-/plugin marketplace add sconedrag/claude-devtools
-/plugin install spawn-guards@claude-devtools
+/plugin marketplace add sconedrag/pitwright
+/plugin install spawn-guards@pitwright
 ```
 
 Plugins need `python3` on `PATH` and use only its standard library.
