@@ -1,0 +1,10 @@
+{
+  "name": "coord",
+  "version": "0.1.0",
+  "description": "Coordinate several Claude Code sessions working in one repository: edit-time file locks, a live session board, an addressed peer mailbox, merge-collision warnings across worktrees, and a closeout ledger for work left uncommitted or unpushed.",
+  "author": { "name": "sconedrag" },
+  "homepage": "https://github.com/sconedrag/pitwright",
+  "repository": "https://github.com/sconedrag/pitwright",
+  "license": "Apache-2.0",
+  "keywords": ["multi-session", "coordination", "file-locks", "worktrees", "hooks"]
+}

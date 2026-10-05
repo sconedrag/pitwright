@@ -10,7 +10,7 @@ Each plugin installs on its own and has its own tests.
 | Plugin | Status | What it does |
 |---|---|---|
 | [`spawn-guards`](plugins/spawn-guards) | available | Enforces a per-agent model-tier floor on subagent spawns; flags delegation prompts that reference context the subagent cannot see. |
-| `coord` | in preparation | Coordination for parallel sessions: worktree-aware locks, durable addressed messages between sessions, a live board, merge-collision foresight, a concurrency-safe memory index, a global build-slot semaphore. |
+| [`coord`](plugins/coord) | available | Coordination for parallel sessions in one repository: edit-time file locks, a live board, durable addressed messages between sessions, merge-collision foresight across worktrees, and a closeout ledger for unfinished work. |
 | `agent-economics` | in preparation | Per-agent × model cost and latency from session transcripts, delegation rate by call and by cost, requested-vs-served tier, A/B harnesses for tier choices. |
 | `context-hooks` | in preparation | A context-fullness notice, a pre-compaction gate that waits for a natural stopping point, and a nudge for under-specified prompts. |
 
@@ -19,6 +19,7 @@ Each plugin installs on its own and has its own tests.
 ```text
 /plugin marketplace add sconedrag/pitwright
 /plugin install spawn-guards@pitwright
+/plugin install coord@pitwright
 ```
 
 Plugins need `python3` on `PATH` and use only its standard library.
