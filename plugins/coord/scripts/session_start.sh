@@ -71,12 +71,11 @@ except Exception:
 # is not counted — it edits different physical files).
 try:
     import coord_locks
-    me = coord_locks.session_id()
     sessions = coord_locks.sessions_dir()
     peers = 0
     if sessions.is_dir():
         for f in sessions.glob("*.json"):
-            if f.stem == me:
+            if coord_locks.is_self(f.stem):
                 continue
             if coord_locks.liveness(f.stem)["state"] != coord_locks.LIVE_DEAD:
                 peers += 1

@@ -92,12 +92,22 @@ under `~/.claude/projects/<project>/memory/`, safe for many sessions writing at 
 yourself (`python3 scripts/memory_index.py --help`); nothing invokes it for you, because
 regenerating an index you maintain by hand would replace it.
 
-## Known limitations (v0.1)
+## Session identity
 
-- **Session identity** comes from `TERM_SESSION_ID`, which macOS Terminal and iTerm2 set.
-  Where it is unset, a session has no coordination identity: it is not registered, takes no
-  locks and is not blocked. Moving identity to Claude Code's own session id is planned for
-  v0.2; the reason it is not done here is that it changes every lock and mailbox key.
+A session is identified by `CLAUDE_CODE_SESSION_ID`, which Claude Code sets for hooks and for
+the commands it runs, so coordination works in any terminal or IDE. A subagent shares its
+parent's id, and therefore its locks. If that variable is absent, coord falls back to
+`TERM_SESSION_ID` (set by macOS Terminal and iTerm2), then to
+`/tmp/.claude-session-<ppid>.id`.
+
+`CLAUDE_CODE_SESSION_ID` is observed Claude Code behaviour rather than a documented
+interface; if it ever disappears, coord degrades to the fallbacks above.
+
+Upgrading from 0.1 changes the key on macOS Terminal and iTerm2, and 0.1 state is not
+migrated — see [CHANGELOG.md](CHANGELOG.md) for what to do before and after upgrading.
+
+## Known limitations
+
 - Locks govern edits made through Claude Code's edit tools. A shell command that writes a file
   is not intercepted.
 - Role-addressed messages (`topic:<role>`) need a role module that is not shipped.

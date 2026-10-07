@@ -61,7 +61,9 @@ Example invocations:
 3. **If `--name` was given**, also record it in the cross-worktree registry, which is what
    `/coord:sessions` lists:
    ```bash
-   SID=$(python3 -c "import json; print(json.load(open('.claude/coordination/current-session.json'))['sessionId'])" 2>/dev/null)
+   # Registry records are keyed by Claude Code's own session id. Older Claude Code without
+   # CLAUDE_CODE_SESSION_ID: fall back to the id the SessionStart hook recorded.
+   SID="${CLAUDE_CODE_SESSION_ID:-$(python3 -c "import json; print(json.load(open('.claude/coordination/current-session.json'))['sessionId'])" 2>/dev/null)}"
    [ -n "$SID" ] && python3 "${CLAUDE_PLUGIN_ROOT}/scripts/session_registry.py" name "<name>" --session-id "$SID"
    ```
 

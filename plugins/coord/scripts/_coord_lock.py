@@ -15,8 +15,8 @@ Design:
     id, acquire() returns True without blocking (supports stacked operations).
   - Self-healing: a lock whose holder PID is dead, or whose `acquiredAt` is
     older than `stale_after`, is reaped and re-acquired.
-  - Session id resolved exactly as coord_locks.session_id(): $TERM_SESSION_ID →
-    /tmp/.claude-session-<ppid>.id → sanitized to [A-Za-z0-9_-].
+  - Session id from `_identity.session_id()` (CLAUDE_CODE_SESSION_ID → TERM_SESSION_ID →
+    /tmp/.claude-session-<ppid>.id), shared with coord_locks; self is plain equality.
 
 Module API:
     from _coord_lock import acquire, release, holder
@@ -43,6 +43,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import coord_config  # noqa: E402
+import _identity  # noqa: E402
 
 
 def _repo_root() -> Path:
@@ -67,16 +68,8 @@ def _utcnow_iso() -> str:
 
 
 def session_id() -> str:
-    """Resolve this session's coordination id (same rules as session-file-guard.sh)."""
-    sid = os.environ.get("TERM_SESSION_ID", "")
-    if not sid:
-        cache = Path(f"/tmp/.claude-session-{os.getppid()}.id")
-        if cache.is_file():
-            try:
-                sid = cache.read_text().strip()
-            except OSError:
-                sid = ""
-    return "".join(c for c in sid if c.isalnum() or c in "_-")
+    """This session's coordination id — see `_identity` for the resolution order."""
+    return _identity.session_id()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -156,7 +149,7 @@ def acquire(name: str, *, timeout: float = 120.0, stale_after: float = 300.0,
     while True:
         existing = holder(name, locks_dir)
         if existing is not None:
-            if existing.get("sessionId") == sid:
+            if _identity.is_self(existing.get("sessionId"), sid):
                 return True  # re-entrant: this session already holds it
             if _is_reapable(existing, stale_after):
                 # Holder is dead or stale — reap and retry immediately.
@@ -192,7 +185,7 @@ def release(name: str, locks_dir: Path | None = None) -> bool:
     meta = holder(name, locks_dir)
     if meta is None:
         return False
-    if meta.get("sessionId") != sid:
+    if not _identity.is_self(meta.get("sessionId"), sid):
         return False  # not ours — never release a peer's lock
     try:
         _lock_path(name, locks_dir).unlink()

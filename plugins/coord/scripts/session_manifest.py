@@ -4,7 +4,7 @@
 Why this exists
 ---------------
 `lock_guard.py` (the PreToolUse edit hook) keys locking on
-`.claude/coordination/sessions/<TERM_SESSION_ID>.json` and, finding none, allows the edit
+`.claude/coordination/sessions/<session id>.json` and, finding none, allows the edit
 with no lock taken: an unregistered session has opted itself out of the coordination layer,
 for itself AND for every peer trying to see it. Relying on every session to run
 `/coord:start-session` before its first edit rewards omission — a session that skips it
@@ -14,7 +14,8 @@ who is active.
 Two identity systems had drifted apart: `session_registry_hook.py` writes
 `current-session.json` keyed by the native session UUID, while the guard reads a manifest
 keyed by `TERM_SESSION_ID`. Auto-registration therefore did not satisfy the guard. This
-module bridges them, so locking is on by DEFAULT and `/coord:start-session` becomes an upgrade
+module bridges them (and since v0.2 both resolve through `_identity`, normally to the same
+native id), so locking is on by DEFAULT and `/coord:start-session` becomes an upgrade
 (declaring a domain) rather than the thing that turns coordination on at all.
 
 Claiming nothing, on purpose
@@ -41,6 +42,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _identity  # noqa: E402
+
 # The domain recorded before anything is known about the session's work. It is a real,
 # reserved value rather than a missing key, so "nobody has said yet" is distinguishable
 # from "the field was dropped" — the latter reads as corruption and gets overwritten.
@@ -59,16 +63,8 @@ def sanitize_session_id(raw: str) -> str:
 
 
 def session_id_from_env(pid: int | None = None) -> str:
-    """The guard's resolution order: TERM_SESSION_ID, else the /tmp PPID cache."""
-    sid = sanitize_session_id(os.environ.get("TERM_SESSION_ID", ""))
-    if sid:
-        return sid
-    ppid = pid if pid is not None else os.getppid()
-    try:
-        cached = Path(f"/tmp/.claude-session-{ppid}.id").read_text().strip()
-        return sanitize_session_id(cached)
-    except OSError:
-        return ""
+    """This session's coordination id — see `_identity` for the resolution order."""
+    return _identity.session_id(pid)
 
 
 def _validated_pid(pid: int | None) -> int:
@@ -190,7 +186,8 @@ def _write_atomic(path: Path, payload: dict) -> bool:
 def native_id(cwd: str, manifest: dict | None = None) -> str:
     """This session's NATIVE uuid — the key the shared registry uses.
 
-    Manifests are keyed by TERM_SESSION_ID and registry records by the native uuid. Without
+    Registry records are keyed by the native uuid. Since v0.2 manifests normally are too,
+    but a manifest keyed by a fallback id (TERM_SESSION_ID) still needs the join. Without
     this join a domain declared on the manifest can never reach the registry, which is why
     `representation()` saw 0 domains across 28 records while three sessions had one.
 
@@ -211,6 +208,11 @@ def native_id(cwd: str, manifest: dict | None = None) -> str:
         manifest = read(directory / f"{sid}.json") if (directory and sid) else None
     if manifest and manifest.get("nativeSessionId"):
         return str(manifest["nativeSessionId"])
+    # Since v0.2 the manifest is normally keyed BY the native id, so the join is the key
+    # itself — no marker needed, and no stale-marker hazard.
+    native_env = _identity.sanitize(os.environ.get(_identity.ENV_NATIVE))
+    if manifest and native_env and manifest.get("sessionId") == native_env:
+        return native_env
     top = git_toplevel(cwd)
     if top is None or manifest is None:
         return ""
@@ -246,44 +248,6 @@ def stamp_native_id(cwd: str, native: str) -> bool:
         return False
     manifest["nativeSessionId"] = native
     return _write_atomic(path, manifest)
-
-
-def session_ids(cwd: str, manifest: dict | None = None) -> dict:
-    """Both ids for THIS session, resolved once: {"term": ..., "native": ..., "pid": ...}.
-
-    THE ROOT CAUSE THIS EXISTS TO REMOVE
-    Session identity lives in two namespaces — `TERM_SESSION_ID` (manifests, one-shot markers,
-    file locks) and the native UUID (the shared registry, and Claude Code's own transcripts) —
-    and code that needs one while holding the other has silently done the wrong thing four
-    separate times:
-
-      1. `representation()` resolved a native uuid against manifests keyed by TERM_SESSION_ID,
-         so it answered `unknown` for 28 of 28 records and the stand-in layer was inert.
-      2. a domain declared on the manifest never reached the registry, so 0 of 28 records
-         carried one while three sessions had.
-      3. `_beat()` looked up a native uuid the registry did not hold and returned silently, so
-         no heartbeat has beaten in production.
-      4. per-session token accounting assumed the `.role-ledger-<TERM_SESSION_ID>` marker could
-         join to a `<native-uuid>.jsonl` transcript. It cannot.
-
-    Every one of those was a caller reaching for whichever id it happened to have. Resolving
-    both together, once, in a function that also carries the long-lived pid, is what stops the
-    fifth instance — patching them individually leaves the trap armed.
-
-    `pid` is the manifest's LONG-LIVED owning pid, deliberately not `os.getppid()`: a hook is
-    invoked through a throwaway shell, so `getppid()` there is that shell (measured: 40462 for
-    a Claude process of 16375). `_owning_pid`'s own docstring records this trap, and the
-    heartbeat's ownership guard walked into it anyway.
-    """
-    directory = sessions_dir(cwd)
-    term = session_id_from_env()
-    if manifest is None:
-        manifest = read(directory / f"{term}.json") if (directory and term) else None
-    return {
-        "term": term,
-        "native": native_id(cwd, manifest) if manifest is not None else "",
-        "pid": int((manifest or {}).get("pid", 0) or 0),
-    }
 
 
 def _publish_domain(cwd: str, manifest: dict, domain: str) -> None:
@@ -346,7 +310,7 @@ def _publish_domain_inner(_sr, cwd: str, manifest: dict, domain: str) -> None:
             #
             # The registry key only has to be stable and unique, not a particular flavour of
             # id, and `role_spawn` never parses it — so fall back to this session's
-            # TERM_SESSION_ID and self-register under it. A session present under a second key
+            # own coordination id (`_identity`) and self-register under it. A session present under a second key
             # is a duplicate row at worst; a session absent entirely is invisible to every
             # peer, which is strictly worse.
             key = sanitize_session_id(manifest.get("sessionId", "")) or session_id_from_env()

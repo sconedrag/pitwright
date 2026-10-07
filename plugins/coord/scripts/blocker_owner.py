@@ -128,7 +128,7 @@ def owner_of_path(path: str) -> dict | None:
     if not meta:
         return None
     sid = meta.get("sessionId", "")
-    if not sid or sid == coord_locks.session_id():
+    if not sid or coord_locks.is_self(sid):
         return None  # unheld, or mine
     return _verdict(sid, f"lock file {coord_locks.lock_path(path).name}",
                     reversible=True, blocker="file-lock", detail=path)
@@ -143,7 +143,7 @@ def owner_of_branch(branch: str) -> dict | None:
     work, rebasing, deleting a branch. Even a certainly-dead owner routes to the operator.
     """
     for sid, rec in _registry().items():
-        if rec.get("branch") == branch and sid != coord_locks.session_id():
+        if rec.get("branch") == branch and not coord_locks.is_self(sid):
             return _verdict(sid, f"sessions-registry branch=={branch}",
                             reversible=False, blocker="worktree-collision",
                             detail=branch)
@@ -170,11 +170,10 @@ def owners_of_dirty(paths: list[str] | None = None) -> list[dict]:
         return []
 
     by_session: dict[str, list[str]] = {}
-    me = coord_locks.session_id()
     for meta in coord_locks.list_locks():
         sid = meta.get("sessionId", "")
         f = meta.get("file")
-        if sid and sid != me and f in dirty:
+        if sid and not coord_locks.is_self(sid) and f in dirty:
             by_session.setdefault(sid, []).append(f)
 
     return [

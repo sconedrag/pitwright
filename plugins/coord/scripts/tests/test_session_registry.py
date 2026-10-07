@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+os.environ.pop("CLAUDE_CODE_SESSION_ID", None)  # hermetic: tests pin identity themselves
 
 SCRIPT = Path(__file__).resolve().parent.parent / "session_registry.py"
 

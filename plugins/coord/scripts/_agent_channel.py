@@ -38,6 +38,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _identity  # noqa: E402
 try:
     import _coord_lock  # session_id()
 except Exception:  # pragma: no cover - defensive
@@ -106,8 +107,7 @@ def session_id() -> str:
             return _coord_lock.session_id() or "anon"
         except Exception:
             pass
-    sid = os.environ.get("TERM_SESSION_ID", "")
-    return re.sub(r"[^A-Za-z0-9_-]", "", sid) or "anon"
+    return _identity.session_id() or "anon"
 
 
 def iface_key(name: str) -> str:

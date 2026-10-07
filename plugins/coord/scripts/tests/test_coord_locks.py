@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+os.environ.pop("CLAUDE_CODE_SESSION_ID", None)  # hermetic: tests pin identity themselves
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import coord_locks as CL  # noqa: E402

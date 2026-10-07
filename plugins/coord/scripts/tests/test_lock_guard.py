@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+os.environ.pop("CLAUDE_CODE_SESSION_ID", None)  # hermetic: tests pin identity themselves
 
 SCRIPTS = Path(__file__).resolve().parent.parent
 GUARD = SCRIPTS / "lock_guard.py"

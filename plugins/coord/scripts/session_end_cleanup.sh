@@ -5,9 +5,11 @@
 # sessions that never call /coord:complete-session. Fire-and-forget (SessionEnd cannot
 # block), so always exit 0.
 #
-# Resolves the coordination session id from $TERM_SESSION_ID (the id the rest of
-# the system locks on) — NOT the SessionEnd stdin `session_id`, which is Claude's
-# own UUID and does not match the lock/manifest keys.
+# Releases exactly ONE key: this session's id from scripts/_identity.py — the same id
+# the edit guard locks under ($CLAUDE_CODE_SESSION_ID, else the v0.1 $TERM_SESSION_ID).
+# Never "every id we might answer to": every tmux pane inherits ONE TERM_SESSION_ID, so a
+# session ending in one pane would otherwise archive a still-running v0.1 session's
+# manifest in another and release its locks.
 #
 # Wired by the plugin's hooks/hooks.json.
 set +e
@@ -17,7 +19,7 @@ ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 cd "$ROOT" 2>/dev/null || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-SID="$(printf '%s' "${TERM_SESSION_ID:-}" | tr -cd 'A-Za-z0-9_-')"
+SID="$(python3 "$SCRIPT_DIR/_identity.py" 2>/dev/null | tr -cd 'A-Za-z0-9_-')"
 [ -z "$SID" ] && exit 0
 [ -f ".claude/coordination/sessions/$SID.json" ] || exit 0
 

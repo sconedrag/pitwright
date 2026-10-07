@@ -67,6 +67,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _agent_channel  # noqa: E402  — channel_dir() / append_event() / worktree_id()
+import _identity  # noqa: E402  — session_id() / is_self()
 
 try:
     import coord_locks  # noqa: E402  — session identity + manifest lookup
@@ -194,7 +195,7 @@ def session_id() -> str:
                 return sid
         except Exception:
             pass
-    return re.sub(r"[^A-Za-z0-9_-]", "", os.environ.get("TERM_SESSION_ID", "")) or "anon"
+    return _identity.session_id() or "anon"
 
 
 def _manifest(sid: str) -> dict:
@@ -258,8 +259,8 @@ def resolve_recipient(spec: str) -> tuple[str, str]:
 def my_keys(sid: str) -> list[str]:
     """Every mailbox key this session should read.
 
-    Includes the NATIVE session UUID as well as `sid` (TERM_SESSION_ID), because a session
-    has two identifiers and peers reasonably use either. The native UUID is the one the
+    Includes `sid` (since v0.2 normally Claude Code's native UUID) plus any other key PROVEN
+    to be this session's — see `_proven_aliases`. The native UUID is the one the
     HARNESS advertises — it is what `ListAgents` shows, what the transcript path is named
     for, and what `current-session.json` records — so a peer addressing "the session I can
     see" writes to that key.
@@ -273,14 +274,18 @@ def my_keys(sid: str) -> list[str]:
 
     Third instance of one root cause: the same native-UUID-vs-TERM_SESSION_ID split made
     `/coord:start-session` manifests unreadable by the edit guard and put a lock in a namespace
-    no reader checked. Reading BOTH keys is the fix here rather than
-    picking a winner — messages already sitting in either mailbox stay deliverable.
+    no reader checked. Reading BOTH keys was the v0.1 fix; v0.2 makes the native UUID the key
+    itself and reads a second key only with proof, because an UNPROVEN second key (the
+    shared TERM_SESSION_ID, a last-writer-wins marker) can belong to a live peer.
     """
     me = whoami()
     keys = [f"session:{sid}", "all"]
-    native = _native_session_id()
-    if native and native != sid:
-        keys.append(f"session:{native}")
+    # Extra keys only with PROOF they are this session's, and only when `sid` is this
+    # session — keys computed for someone else must never pick up ours.
+    if sid == session_id():
+        for alias in _proven_aliases(sid):
+            if alias and f"session:{alias}" not in keys:
+                keys.append(f"session:{alias}")
     if me["worktree"]:
         keys.append(f"worktree:{me['worktree']}")
     keys.extend(_my_role_topics())
@@ -320,20 +325,32 @@ def _my_role_topics() -> list[str]:
         return []
 
 
-def _native_session_id() -> str:
-    """The harness's own session UUID, from the SessionStart self-marker.
+def _proven_aliases(sid: str) -> list[str]:
+    """Other mailbox keys belonging to session `sid` — in practice only in FALLBACK mode.
 
-    Best-effort: an absent marker just means this session was never registered, in which
-    case there is no native key to listen on and the TERM_SESSION_ID key still works.
+    Under v0.2 `sid` IS Claude Code's native UUID, so this adds nothing. Without
+    CLAUDE_CODE_SESSION_ID (an older Claude Code), `sid` is the TERM_SESSION_ID and peers
+    still address the native UUID they see in `ListAgents`; reading it is the v0.1
+    dead-letter fix. The id comes from `session_manifest.native_id`: our manifest's
+    `nativeSessionId`, else the per-worktree self-marker only when its pid matches our
+    manifest (unverified, a last-writer-wins marker can name another session).
+
+    Known limit, unchanged from v0.1 and confined to fallback mode: tmux panes sharing one
+    TERM_SESSION_ID share one manifest, whose `nativeSessionId` is the last pane to start.
+    `TERM_SESSION_ID` itself is never treated as anyone's alias.
     """
-    if coord_locks is None:
-        return ""
+    out: list[str] = []
+    manifest = _manifest(sid)
     try:
-        marker = coord_locks.coord_dir() / "current-session.json"
-        data = json.loads(marker.read_text())
-        return re.sub(r"[^A-Za-z0-9_-]", "", str(data.get("sessionId", "")))
-    except (OSError, ValueError, AttributeError):
-        return ""
+        import session_manifest as _sm
+        native = _sm.native_id(os.getcwd(), manifest or None) if manifest else ""
+        if native:
+            out.append(re.sub(r"[^A-Za-z0-9_-]", "", native))
+    except Exception:
+        pass
+    return [a for a in out if a and a != sid]
+
+
 
 
 # ---------------------------------------------------------------------------- statuses
@@ -558,7 +575,8 @@ def inbox(show_all: bool = False, open_only: bool = False, mark: bool = True,
         msgs.extend(rows)
         new_cursors[key] = end
 
-    msgs = [m for m in msgs if m.get("from", {}).get("sessionId") != sid]   # not my own
+    msgs = [m for m in msgs
+            if not _identity.is_self(m.get("from", {}).get("sessionId"), sid)]   # not my own
     if intent:
         msgs = [m for m in msgs if m.get("intent") == intent]
     msgs = _decorate(msgs)
@@ -602,7 +620,8 @@ def peek() -> dict:
 
 def outbox(open_only: bool = False) -> list[dict]:
     sid = session_id()
-    mine = [m for m in _all_messages() if m.get("from", {}).get("sessionId") == sid]
+    mine = [m for m in _all_messages()
+            if _identity.is_self(m.get("from", {}).get("sessionId"), sid)]
     mine = _decorate(mine)
     if open_only:
         mine = [m for m in mine if m["_status"] == "open"]

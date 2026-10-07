@@ -395,8 +395,8 @@ def liveness(entry: dict) -> dict:
     Why this exists rather than reusing `coord_locks.liveness`
     ---------------------------------------------------------
     That function resolves a session id to `sessions/<id>.json`, a per-worktree manifest keyed
-    by TERM_SESSION_ID. Registry records are keyed by the NATIVE session UUID. They are
-    different id namespaces, so the lookup misses for every record — not merely for records
+    by `_identity.session_id()` (TERM_SESSION_ID in v0.1). Registry records are keyed by the
+    NATIVE session UUID. Under v0.1 those were different id namespaces, so the lookup misses for every record — not merely for records
     from another worktree, but for every session that has ever existed, including the local
     live one. It therefore answered `unknown` 100% of the time, by construction, which read as
     "cannot determine" and (correctly, per the fail-closed rule) blocked every stand-in spawn

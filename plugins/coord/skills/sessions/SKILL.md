@@ -21,8 +21,11 @@ Parse `$ARGUMENTS` and dispatch:
    - Show the output verbatim.
 
 2. **Name the CURRENT session — `name "<name>"`:**
-   - Resolve *self*: read `.claude/coordination/current-session.json` (written at session
-     start) → use its `sessionId`. If the marker is missing, fall back to the registry entry
+   - Resolve *self*: use `$CLAUDE_CODE_SESSION_ID` (Claude Code's own session id, the
+     registry's key). Only if it is unset (older Claude Code), read
+     `.claude/coordination/current-session.json` (written at session start; per-checkout
+     and last-writer-wins, so it can name another session here) → use its `sessionId`.
+     If both are missing, fall back to the registry entry
      whose `pid` equals this shell's parent process id; if still ambiguous and exactly one
      active session exists in this worktree, use that. If self cannot be resolved, tell the
      user to pass an explicit id via `rename`.

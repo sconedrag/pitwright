@@ -53,6 +53,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import coord_config  # noqa: E402
+import _identity  # noqa: E402
 
 try:
     import _coord_lock  # noqa: E402  — reuse its PID liveness probe
@@ -108,16 +109,36 @@ def sessions_dir() -> Path:
 
 
 def session_id() -> str:
-    sid = os.environ.get("TERM_SESSION_ID", "")
-    sid = re.sub(r"[^A-Za-z0-9_-]", "", sid)
-    if sid:
-        return sid
-    cached = Path(f"/tmp/.claude-session-{os.getppid()}.id")
-    if cached.exists():
-        try:
-            return re.sub(r"[^A-Za-z0-9_-]", "", cached.read_text().strip())
-        except OSError:
-            pass
+    """This session's coordination id — see `_identity` for the resolution order."""
+    return _identity.session_id()
+
+
+def is_self(other: str | None, sid: str | None = None) -> bool:
+    """Does `other` name this session (or the explicitly named `sid`)? Plain equality.
+
+    Goes through this module's `session_id()` so there is ONE seam to substitute in tests.
+    Deliberately no aliases — see `_identity` for why `TERM_SESSION_ID` is not proof.
+    """
+    me = sid or session_id()
+    return bool(other) and bool(me) and other == me
+
+
+def _legacy_release_refusal() -> str:
+    """Guard the documented 0.1 escape hatch (`CLAUDE_CODE_SESSION_ID= ... release`).
+
+    Blanking the variable makes this process act as the 0.1 key, `TERM_SESSION_ID`, which is
+    NOT unique: tmux panes inherit it from the tmux server. If that key's manifest names a
+    process that is still running, the locks may be a live peer's — refuse. After the
+    restart the upgrade notes ask for, one's own 0.1 process is gone and this passes.
+    """
+    if os.environ.get(_identity.ENV_NATIVE) != "":   # only the explicit-blank escape hatch
+        return ""
+    sid = session_id()
+    manifest = _session_manifest(sid) if sid else None
+    pid = int((manifest or {}).get("pid", 0) or 0)
+    if pid > 0 and (manifest or {}).get("host", HOST) == HOST and _pid_alive(pid):
+        return (f"refusing: locks under {sid} belong to process {pid}, which is still running "
+                "(another tmux pane, or a session not yet restarted). End that session first.")
     return ""
 
 
@@ -440,7 +461,8 @@ def claim(path: str, sid: str | None = None, domain: str = "unknown") -> tuple[b
     """Atomically take the lock. Returns (ok, reason)."""
     sid = sid or session_id()
     if not sid:
-        return False, "no session id (TERM_SESSION_ID unset and no PPID cache)"
+        return False, ("no session id (CLAUDE_CODE_SESSION_ID and TERM_SESSION_ID unset, "
+                       "no PPID cache)")
     rel = rel_path(path)
     f = lock_path(path)
     record = {
@@ -461,7 +483,7 @@ def claim(path: str, sid: str | None = None, domain: str = "unknown") -> tuple[b
                 # Genuinely unattributable (empty/corrupt) — no session to protect.
                 f.unlink(missing_ok=True)
                 continue
-            if existing.get("sessionId") == sid:
+            if is_self(existing.get("sessionId"), sid):
                 return True, "already held by this session"
             if is_stale(existing):
                 f.unlink(missing_ok=True)
@@ -484,10 +506,11 @@ def release(path: str, sid: str | None = None) -> tuple[bool, str]:
         meta = json.loads(f.read_text())
     except (OSError, ValueError):
         meta = {}
-    if meta.get("sessionId") not in (sid, None, ""):
-        return False, f"held by another session ({meta.get('sessionId')})"
+    holder = meta.get("sessionId")
+    if holder not in (None, "") and not is_self(holder, sid):
+        return False, f"held by another session ({holder})"
     f.unlink(missing_ok=True)
-    _manifest_remove(sid, rel_path(path))
+    _manifest_remove(holder or sid, rel_path(path))
     return True, "released"
 
 
@@ -552,6 +575,12 @@ def main() -> int:
                         f"{r.get('file','?')}  [{r.get('domain','?')}] {r.get('sessionId','?')}"
                         for r in rows) or "(no locks)")
         return 0
+
+    if args.action == "release":
+        refusal = _legacy_release_refusal()
+        if refusal:
+            print(refusal, file=sys.stderr)
+            return 1
 
     if args.action == "release" and args.all:
         sid = session_id()

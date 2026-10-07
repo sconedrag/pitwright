@@ -3,7 +3,7 @@
 
 Safe to hand to a SUBAGENT. It mutates nothing: no locks taken or released, no messages
 sent, no cursors advanced. That matters because subagents are deliberately NOT coordination
-principals — they inherit their parent's TERM_SESSION_ID (see coord_locks.session_id(),
+principals — they inherit their parent's session id (see _identity.session_id(),
 which resolves identity from that env var), so a subagent shares its parent's lock identity
 and does not appear in ListAgents at all. Letting each subagent negotiate would mean N
 agents speaking for one session, with the peer unable to tell them apart.

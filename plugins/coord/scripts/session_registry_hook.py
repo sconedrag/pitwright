@@ -9,14 +9,15 @@ deny-listed). On each session start it:
   2. writes a per-worktree self-marker `.claude/coordination/current-session.json`
      = {"sessionId": "<uuid>", "pid": <ppid>} so the /coord:sessions skill can identify
      *itself* for self-naming; and
-  3. writes the `sessions/<TERM_SESSION_ID>.json` manifest that `lock_guard.py`
+  3. writes the `sessions/<session id>.json` manifest that `lock_guard.py`
      reads, so file locking is ON BY DEFAULT.
 
 Step 3 exists because the guard used to fail open — no manifest meant no locking, so
 skipping `/coord:start-session` opted a session out of coordination entirely, for itself and for
 every peer trying to see it (most worktrees had no sessions/ dir at all). Steps 1 and 3
-also key on DIFFERENT identifiers — the native UUID and TERM_SESSION_ID respectively — which
-is precisely why registering in step 1 never satisfied the guard. `session_manifest.ensure`
+keyed on DIFFERENT identifiers in v0.1 — the native UUID and TERM_SESSION_ID respectively —
+which is why registering in step 1 never satisfied the guard. Since v0.2 the manifest key
+comes from `_identity`, normally the same native UUID. `session_manifest.ensure`
 is idempotent and will not flatten a manifest that `/coord:start-session` already declared.
 
 Reads the hook payload as JSON on stdin: {session_id, cwd, transcript_path, ...}.
@@ -97,8 +98,27 @@ def _ensure_manifest(cwd: str, session_id: str, pid: int) -> None:
     if session_manifest is None:
         return
     try:
+        # Key the manifest with the SAME resolver every reader uses, not the payload id.
+        # Under current Claude Code the two are equal (CLAUDE_CODE_SESSION_ID is the payload
+        # id); if they ever diverge, keying on the payload would put the manifest where no
+        # skill script looks — the two-namespace bug again. Record the divergence instead.
+        resolved = session_manifest.session_id_from_env(pid)
+        if resolved and resolved != session_manifest.sanitize_session_id(session_id):
+            _log_identity_mismatch(resolved, session_id)
         session_manifest.ensure(cwd, pid, native_session_id=session_id)
     except Exception:  # noqa: BLE001 - a SessionStart hook must never raise
+        pass
+
+
+def _log_identity_mismatch(resolved: str, payload_id: str) -> None:
+    """Expected only when CLAUDE_CODE_SESSION_ID is absent (an older Claude Code)."""
+    try:
+        import _agent_channel
+        _agent_channel.append_event(
+            "IDENTITY_MISMATCH",
+            f"coordination id {resolved} != hook payload session_id {payload_id}",
+            sid=resolved)
+    except Exception:  # noqa: BLE001 - diagnostics only
         pass
 
 

@@ -23,6 +23,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+os.environ.pop("CLAUDE_CODE_SESSION_ID", None)  # hermetic: tests pin identity themselves
 
 SCRIPTS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPTS))

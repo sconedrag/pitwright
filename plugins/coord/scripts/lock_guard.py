@@ -102,11 +102,9 @@ def decide(payload: dict) -> tuple[int, str]:
         return 0, ""
 
     sid = coord_locks.session_id()
-    if not sid:
-        return 0, ""
-    manifest = coord_locks._session_manifest(sid)
+    manifest = coord_locks._session_manifest(sid) if sid else None
     if manifest is None:
-        return 0, ""  # unregistered session: locking is off for it
+        return _unregistered(path)
 
     ok, reason = coord_locks.claim(path, sid, domain=manifest.get("domain") or "unknown")
     if ok:
@@ -127,6 +125,28 @@ def decide(payload: dict) -> tuple[int, str]:
 
     advisory = bool(coord_config.get("locks_advisory"))
     return (0 if advisory else 2), _blocked_message(rel, meta, advisory)
+
+
+def _unregistered(path: str) -> tuple[int, str]:
+    """A session with no manifest takes no locks — but it must still respect a live peer's.
+
+    Since v0.2 this is reachable by a session that was registered under its 0.1 key
+    (`TERM_SESSION_ID`) and now resolves Claude Code's id: it has no manifest under the new
+    key. Allowing the edit outright would let it write through a peer's lock with no message,
+    which a 0.1 session on Terminal/iTerm (always registered) could never do.
+    """
+    import coord_config
+    import coord_locks
+
+    meta = coord_locks.read_lock(path)
+    if meta and not coord_locks.is_stale(meta) and not coord_locks.is_self(meta.get("sessionId")):
+        advisory = bool(coord_config.get("locks_advisory"))
+        return (0 if advisory else 2), _blocked_message(coord_locks.rel_path(path), meta, advisory)
+    legacy = coord_locks._identity.legacy_id()
+    if legacy and legacy != coord_locks.session_id() and coord_locks._session_manifest(legacy):
+        return 0, ("coord: this session is registered under its 0.1 key, so it takes no locks. "
+                   "Restart or resume it to register under its Claude Code id.")
+    return 0, ""
 
 
 def main() -> int:
